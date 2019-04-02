@@ -15,7 +15,6 @@
  */
 package io.micronaut.http.netty.channel;
 
-import io.micronaut.context.annotation.Bean;
 import io.micronaut.context.annotation.Factory;
 import io.micronaut.core.annotation.TypeHint;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -41,7 +40,8 @@ import java.util.concurrent.ThreadFactory;
 @TypeHint(value = {
         NioServerSocketChannel.class,
         NioSocketChannel.class
-}, typeNames = "sun.security.ssl.SSLContextImpl$TLSContext"
+}, typeNames = {"sun.security.ssl.SSLContextImpl$TLSContext", "sun.nio.ch.SelectorImpl"},
+   accessType = {TypeHint.AccessType.ALL_DECLARED_CONSTRUCTORS, TypeHint.AccessType.ALL_DECLARED_FIELDS}
 )
 public class NettyThreadFactory {
 
@@ -60,7 +60,6 @@ public class NettyThreadFactory {
      *
      * @return The thread factory
      */
-    @Bean
     @Singleton
     @Named(NAME)
     ThreadFactory nettyThreadFactory() {

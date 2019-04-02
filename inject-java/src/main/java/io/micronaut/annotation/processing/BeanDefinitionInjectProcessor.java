@@ -99,6 +99,7 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
             "io.micronaut.context.annotation.Bean",
             "io.micronaut.context.annotation.Replaces",
             "io.micronaut.context.annotation.Value",
+            "io.micronaut.context.annotation.Property",
             "io.micronaut.context.annotation.Executable"
     };
     private static final String AROUND_TYPE = "io.micronaut.aop.Around";
@@ -684,7 +685,7 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
                 return;
             }
 
-            BeanDefinitionWriter beanMethodWriter = createFactoryBeanMethodWriterFor(beanMethod, returnType, producedElement);
+            BeanDefinitionWriter beanMethodWriter = createFactoryBeanMethodWriterFor(beanMethod, producedElement);
 
             if (returnType instanceof DeclaredType) {
                 DeclaredType dt = (DeclaredType) returnType;
@@ -712,7 +713,10 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
             final String beanMethodName = beanMethod.getSimpleName().toString();
             final Map<String, Object> beanMethodParameters = beanMethodParams.getParameters();
             final Object beanMethodDeclaringType = modelUtils.resolveTypeReference(beanMethod.getEnclosingElement());
-            AnnotationMetadata methodAnnotationMetadata = annotationUtils.newAnnotationBuilder().buildForMethod(beanMethod);
+            AnnotationMetadata methodAnnotationMetadata = annotationUtils.newAnnotationBuilder().buildForParent(
+                    producedElement,
+                    beanMethod
+            );
             beanMethodWriter.visitBeanFactoryMethod(
 
                     beanMethodDeclaringType,
@@ -1384,7 +1388,7 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
         public Object visitConfigurationProperty(VariableElement field, AnnotationMetadata fieldAnnotationMetadata) {
             Optional<ExecutableElement> setterMethod = modelUtils.findSetterMethodFor(field);
             boolean isInjected = fieldAnnotationMetadata.hasStereotype(Inject.class);
-            boolean isValue = fieldAnnotationMetadata.hasStereotype(Value.class);
+            boolean isValue = fieldAnnotationMetadata.hasStereotype(Value.class) || fieldAnnotationMetadata.hasStereotype(Property.class);
 
             boolean isMethodInjected = isInjected || (setterMethod.isPresent() && annotationUtils.hasStereotype(setterMethod.get(), Inject.class));
             if (!(isMethodInjected || isValue)) {
@@ -1643,8 +1647,7 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
             TypeElement current = typeElement;
             while (current != null) {
 
-                List<? extends TypeMirror> interfaces = current.getInterfaces();
-                populateTypeArgumentsForInterfaces(typeArguments, interfaces);
+                populateTypeArgumentsForInterfaces(typeArguments, current);
                 TypeMirror superclass = current.getSuperclass();
 
                 if (superclass.getKind() == TypeKind.NONE) {
@@ -1657,12 +1660,15 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
 
                         Element te = dt.asElement();
                         if (te instanceof TypeElement) {
+                            TypeElement child = current;
                             current = (TypeElement) te;
                             if (CollectionUtils.isNotEmpty(superArguments)) {
                                 Map<String, Object> types = genericUtils.resolveBoundTypes(dt);
                                 String name = current.getQualifiedName().toString();
+                                carryForwardArguments(child, typeArguments, types);
                                 typeArguments.put(name, types);
                             }
+
                         } else {
                             break;
                         }
@@ -1673,8 +1679,8 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
             }
         }
 
-        private void populateTypeArgumentsForInterfaces(Map<String, Map<String, Object>> typeArguments, List<? extends TypeMirror> interfaces) {
-            for (TypeMirror anInterface : interfaces) {
+        private void populateTypeArgumentsForInterfaces(Map<String, Map<String, Object>> typeArguments, TypeElement child) {
+            for (TypeMirror anInterface : child.getInterfaces()) {
                 if (anInterface instanceof DeclaredType) {
                     DeclaredType declaredType = (DeclaredType) anInterface;
                     Element element = declaredType.asElement();
@@ -1683,11 +1689,24 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
                         String name = te.getQualifiedName().toString();
                         if (!typeArguments.containsKey(name)) {
                             Map<String, Object> types = genericUtils.resolveBoundTypes(declaredType);
+                            carryForwardArguments(child, typeArguments, types);
                             typeArguments.put(name, types);
                         }
-                        populateTypeArgumentsForInterfaces(typeArguments, te.getInterfaces());
+                        populateTypeArgumentsForInterfaces(typeArguments, te);
                     }
                 }
+            }
+        }
+
+        private void carryForwardArguments(TypeElement child, Map<String, Map<String, Object>> typeArguments, Map<String, Object> types) {
+            String childName = child.getQualifiedName().toString();
+            //carry forward type arguments from the child
+            if (typeArguments.containsKey(childName)) {
+                typeArguments.get(childName).forEach((arg, type) -> {
+                    if (types.containsKey(arg)) {
+                        types.put(arg, type);
+                    }
+                });
             }
         }
 
@@ -1778,8 +1797,8 @@ public class BeanDefinitionInjectProcessor extends AbstractInjectAnnotationProce
             }
         }
 
-        private BeanDefinitionWriter createFactoryBeanMethodWriterFor(ExecutableElement method, TypeMirror producedType, TypeElement producedElement) {
-            AnnotationMetadata annotationMetadata = annotationUtils.getAnnotationMetadata(method);
+        private BeanDefinitionWriter createFactoryBeanMethodWriterFor(ExecutableElement method, TypeElement producedElement) {
+            AnnotationMetadata annotationMetadata = annotationUtils.newAnnotationBuilder().buildForParent(producedElement, method, true);
             PackageElement producedPackageElement = elementUtils.getPackageOf(producedElement);
             PackageElement definingPackageElement = elementUtils.getPackageOf(concreteClass);
 

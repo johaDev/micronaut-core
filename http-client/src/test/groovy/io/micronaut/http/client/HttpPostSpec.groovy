@@ -26,6 +26,7 @@ import io.micronaut.http.client.annotation.Client
 import io.micronaut.http.client.exceptions.HttpClientException
 import io.micronaut.http.client.multipart.MultipartBody
 import io.micronaut.http.multipart.CompletedFileUpload
+import io.micronaut.core.type.Argument
 import io.micronaut.runtime.server.EmbeddedServer
 import io.reactivex.Flowable
 import spock.lang.AutoCleanup
@@ -45,7 +46,6 @@ class HttpPostSpec extends Specification {
     ApplicationContext context = ApplicationContext.run()
 
     @Shared
-    @AutoCleanup
     EmbeddedServer embeddedServer = context.getBean(EmbeddedServer).start()
 
     @Shared
@@ -299,6 +299,37 @@ class HttpPostSpec extends Specification {
         context.getBean(PostClient).call() == "0"
     }
 
+    void "test simple post request url encoded"() {
+        given:
+        def toSend = new Book(title: "The Stand", pages: 1000)
+        when:
+        BlockingHttpClient blockingHttpClient = client.toBlocking()
+        Book book = blockingHttpClient.retrieve(
+                HttpRequest.POST("/post/query/url-encoded", toSend)
+                        .contentType(MediaType.APPLICATION_FORM_URLENCODED_TYPE)
+                        .accept(MediaType.APPLICATION_JSON_TYPE),
+
+                Book
+        )
+
+        then:
+        book == toSend
+    }
+
+    void "test posting an array of simple types"() {
+        BlockingHttpClient blockingHttpClient = client.toBlocking()
+        List<Boolean> booleans = blockingHttpClient.retrieve(
+                HttpRequest.POST("/post/booleans", "[true, true, false]"),
+
+                Argument.of(List.class, Boolean.class)
+        )
+
+        expect:
+        booleans[0] == true
+        booleans[1] == true
+        booleans[2] == false
+    }
+
     @Controller('/post')
     static class PostController {
 
@@ -316,6 +347,13 @@ class HttpPostSpec extends Specification {
             assert title == book.title
             return book
         }
+
+        @Post(uri = '/query/url-encoded', consumes = MediaType.APPLICATION_FORM_URLENCODED)
+        Book simpleUrlEncoded(@Body Book book, String title) {
+            assert title == book.title
+            return book
+        }
+
 
         @Post('/queryNoBody')
         Book simple(@QueryValue("title") String title) {
@@ -369,6 +407,11 @@ class HttpPostSpec extends Specification {
                 produces = MediaType.TEXT_PLAIN)
         String multipartCharset(@Body CompletedFileUpload file) {
             return file.fileUpload.getCharset()
+        }
+
+        @Post(uri = "/booleans")
+        List<Boolean> booleans(@Body List<Boolean> booleans) {
+            return booleans
         }
     }
 

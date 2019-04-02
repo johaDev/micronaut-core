@@ -54,10 +54,7 @@ import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
-import io.swagger.v3.oas.models.media.ArraySchema;
-import io.swagger.v3.oas.models.media.ComposedSchema;
-import io.swagger.v3.oas.models.media.ObjectSchema;
-import io.swagger.v3.oas.models.media.Schema;
+import io.swagger.v3.oas.models.media.*;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import org.reactivestreams.Publisher;
 
@@ -91,6 +88,11 @@ abstract class AbstractOpenApiVisitor  {
      * The YAML mapper.
      */
     ObjectMapper yamlMapper = Yaml.mapper();
+
+    /**
+     * Stores the current in progress type.
+     */
+    private List<String> inProgressSchemas = new ArrayList<>(10);
 
     /**
      * Convert the given map to a JSON node.
@@ -161,8 +163,13 @@ abstract class AbstractOpenApiVisitor  {
 
             if (value instanceof AnnotationValue) {
                 AnnotationValue<?> av = (AnnotationValue<?>) value;
-                final Map<CharSequence, Object> valueMap = resolveAnnotationValues(context, av);
-                newValues.put(key, valueMap);
+                if (av.getAnnotationName().equals(io.swagger.v3.oas.annotations.media.ArraySchema.class.getName())) {
+                    final Map<CharSequence, Object> valueMap = resolveArraySchemaAnnotationValues(context, av);
+                    newValues.put("schema", valueMap);
+                } else {
+                    final Map<CharSequence, Object> valueMap = resolveAnnotationValues(context, av);
+                    newValues.put(key, valueMap);
+                }
             } else if (value instanceof AnnotationClassValue) {
                 AnnotationClassValue<?> acv = (AnnotationClassValue) value;
                 final Optional<? extends Class<?>> type = acv.getType();
@@ -252,6 +259,33 @@ abstract class AbstractOpenApiVisitor  {
         return newValues;
     }
 
+    private Map<CharSequence, Object> resolveArraySchemaAnnotationValues(VisitorContext context, AnnotationValue<?> av) {
+        final Map<CharSequence, Object> arraySchemaMap = new HashMap<>(10);
+        av.get("schema", AnnotationValue.class).ifPresent(annotationValue -> {
+            Optional<String> impl = ((AnnotationValue<?>) annotationValue).get("implementation", String.class);
+            Optional<String> type = ((AnnotationValue<?>) annotationValue).get("type", String.class);
+            Optional<ClassElement> classElement = Optional.empty();
+            if (impl.isPresent()) {
+                classElement = context.getClassElement(impl.get());
+            } else if (type.isPresent()) {
+                PrimitiveType primitiveType = PrimitiveType.fromName(type.get());
+                if (primitiveType != null) {
+                    classElement = context.getClassElement(primitiveType.getKeyClass());
+                } else {
+                    classElement = context.getClassElement(type.get());
+                }
+            }
+            if (classElement.isPresent()) {
+                final OpenAPI openAPI = resolveOpenAPI(context);
+                final ArraySchema schema = arraySchema(resolveSchema(openAPI, null, classElement.get(), context, null));
+                schemaToValueMap(arraySchemaMap, schema);
+            } else {
+                arraySchemaMap.putAll(resolveAnnotationValues(context, av));
+            }
+        });
+        return arraySchemaMap;
+    }
+
     private Map<CharSequence, Object> resolveAnnotationValues(VisitorContext context, AnnotationValue<?> av) {
         final Map<CharSequence, Object> valueMap = toValueMap(av.getValues(), context);
         bindSchemaIfNeccessary(context, av, valueMap);
@@ -310,6 +344,18 @@ abstract class AbstractOpenApiVisitor  {
                     schema = getPrimitiveType(typeName);
                 } else if (primitiveType != null) {
                     schema = primitiveType.createProperty();
+                } else if (type.isAssignable(Map.class.getName())) {
+                    schema = new MapSchema();
+                    if (type.getTypeArguments().isEmpty()) {
+                        schema.setAdditionalProperties(true);
+                    } else {
+                        Element valueType = type.getTypeArguments().get("V");
+                        Schema additionalPropertiesSchema = getPrimitiveType(valueType.getName());
+                        if (additionalPropertiesSchema == null) {
+                            additionalPropertiesSchema = getSchemaDefinition(mediaType, openAPI, context, valueType, definingElement);
+                        }
+                        schema.setAdditionalProperties(additionalPropertiesSchema);
+                    }
                 } else if (type.isIterable()) {
                     Optional<ClassElement> componentType = type.getFirstTypeArgument();
                     if (componentType.isPresent()) {
@@ -318,12 +364,14 @@ abstract class AbstractOpenApiVisitor  {
                         schema = getPrimitiveType(Object.class.getName());
                     }
 
-                    if (schema != null) {
-                        schema = arraySchema(schema);
-                    } else if (componentType.isPresent()) {
+                    if (schema == null && componentType.isPresent()) {
                         ClassElement componentElement = componentType.get();
                         // we must have a POJO so let's create a component
                         schema = getSchemaDefinition(mediaType, openAPI, context, componentElement, definingElement);
+                    }
+
+                    if (schema != null) {
+                        schema = arraySchema(schema);
                     }
                 } else {
                     schema = getSchemaDefinition(mediaType, openAPI, context, type, definingElement);
@@ -333,7 +381,7 @@ abstract class AbstractOpenApiVisitor  {
 
             if (schema != null) {
                 boolean isStream = MediaType.TEXT_EVENT_STREAM.equals(mediaType) || MediaType.APPLICATION_JSON_STREAM.equals(mediaType);
-                if ((!isStream && isPublisher) || type.isIterable()) {
+                if ((!isStream && isPublisher)) {
                     schema = arraySchema(schema);
                 }
             }
@@ -493,6 +541,21 @@ abstract class AbstractOpenApiVisitor  {
         return mediaTypes;
     }
 
+    private void schemaToValueMap(Map<CharSequence, Object> valueMap, Schema schema) {
+        if (schema != null) {
+            final BeanMap<Schema> beanMap = BeanMap.of(schema);
+            for (Map.Entry<String, Object> e : beanMap.entrySet()) {
+                final Object v = e.getValue();
+                if (v != null) {
+                    valueMap.put(e.getKey(), v);
+                }
+            }
+            if (schema.get$ref() != null) {
+                valueMap.put("$ref", schema.get$ref());
+            }
+        }
+    }
+
     private void bindSchemaIfNeccessary(VisitorContext context, AnnotationValue<?> av, Map<CharSequence, Object> valueMap) {
         final Optional<String> impl = av.get("implementation", String.class);
         if (io.swagger.v3.oas.annotations.media.Schema.class.getName().equals(av.getAnnotationName()) && impl.isPresent()) {
@@ -501,15 +564,7 @@ abstract class AbstractOpenApiVisitor  {
             final OpenAPI openAPI = resolveOpenAPI(context);
             if (classElement.isPresent()) {
                 final Schema schema = resolveSchema(openAPI, null, classElement.get(), context, null);
-                if (schema != null) {
-                    final BeanMap<Schema> beanMap = BeanMap.of(schema);
-                    for (Map.Entry<String, Object> e : beanMap.entrySet()) {
-                        final Object v = e.getValue();
-                        if (v != null) {
-                            valueMap.put(e.getKey(), v);
-                        }
-                    }
-                }
+                schemaToValueMap(valueMap, schema);
             }
         }
     }
@@ -520,14 +575,19 @@ abstract class AbstractOpenApiVisitor  {
             VisitorContext context,
             Element type,
             @Nullable Element definingElement) {
-        AnnotationValue<io.swagger.v3.oas.annotations.media.Schema> schemaValue = definingElement != null ? definingElement.getAnnotation(io.swagger.v3.oas.annotations.media.Schema.class) : null;
+        // To break the recursion
+        if (inProgressSchemas.contains(type.getSimpleName())) {
+            return null;
+        }
+        AnnotationValue<io.swagger.v3.oas.annotations.media.Schema> schemaValue = definingElement != null ? definingElement.getDeclaredAnnotation(io.swagger.v3.oas.annotations.media.Schema.class) : null;
         if (schemaValue == null) {
-            schemaValue = type.getAnnotation(io.swagger.v3.oas.annotations.media.Schema.class);
+            schemaValue = type.getDeclaredAnnotation(io.swagger.v3.oas.annotations.media.Schema.class);
         }
         Schema schema;
         Map<String, Schema> schemas = resolveSchemas(openAPI);
         if (schemaValue != null) {
             String schemaName = schemaValue.get("name", String.class).orElse(computeDefaultSchemaName(definingElement, type));
+            inProgressSchemas.add(schemaName);
             schema = schemas.get(schemaName);
             if (schema == null) {
                 JsonNode schemaJson = toJson(schemaValue.getValues(), context);
@@ -537,7 +597,7 @@ abstract class AbstractOpenApiVisitor  {
                     if (schema != null) {
                         if (schema instanceof ComposedSchema) {
                             final Optional<String[]> allOf = schemaValue.get("allOf", String[].class);
-                            if (allOf.isPresent()) {
+                            if (allOf.isPresent() && allOf.get().length > 0) {
                                 final String[] names = allOf.get();
                                 List<Schema> schemaList = namesToSchemas(mediaType, openAPI, context, names);
 
@@ -545,14 +605,14 @@ abstract class AbstractOpenApiVisitor  {
                             }
 
                             final Optional<String[]> anyOf = schemaValue.get("anyOf", String[].class);
-                            if (anyOf.isPresent()) {
+                            if (anyOf.isPresent() && anyOf.get().length > 0) {
                                 final String[] names = anyOf.get();
                                 List<Schema> schemaList = namesToSchemas(mediaType, openAPI, context, names);
                                 ((ComposedSchema) schema).anyOf(schemaList);
                             }
 
                             final Optional<String[]> oneof = schemaValue.get("oneOf", String[].class);
-                            if (oneof.isPresent()) {
+                            if (oneof.isPresent() && oneof.get().length > 0) {
                                 final String[] names = oneof.get();
                                 List<Schema> schemaList = namesToSchemas(mediaType, openAPI, context, names);
                                 ((ComposedSchema) schema).oneOf(schemaList);
@@ -571,6 +631,8 @@ abstract class AbstractOpenApiVisitor  {
                     }
                 } catch (JsonProcessingException e) {
                     context.warn("Error reading Swagger Parameter for element [" + type + "]: " + e.getMessage(), type);
+                } finally {
+                    inProgressSchemas.remove(schemaName);
                 }
             }
         } else {
@@ -610,7 +672,6 @@ abstract class AbstractOpenApiVisitor  {
                                     if (parentSchema != null) {
                                         ((ComposedSchema) schema).allOf(Collections.singletonList(parentSchema));
                                     }
-
                                     superType = superElement.getSuperType();
                                 }
                             }

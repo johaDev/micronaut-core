@@ -15,7 +15,6 @@
  */
 package io.micronaut.configuration.hibernate.validator;
 
-import io.micronaut.context.annotation.Bean;
 import io.micronaut.context.annotation.Factory;
 import io.micronaut.context.annotation.Requires;
 import io.micronaut.context.annotation.Value;
@@ -44,7 +43,7 @@ import java.util.Properties;
  */
 @Factory
 @Requires(classes = HibernateValidator.class)
-@TypeHint(value = HibernateValidator.class, accessType = TypeHint.AccessType.CLASS_LOADING)
+@TypeHint(value = HibernateValidator.class)
 public class ValidatorFactoryProvider {
 
     @Inject
@@ -68,7 +67,6 @@ public class ValidatorFactoryProvider {
      * @return validator factory
      */
     @Singleton
-    @Bean
     @Requires(classes = HibernateValidator.class)
     ValidatorFactory validatorFactory(Optional<Environment> environment) {
         Configuration validatorConfiguration = Validation.byDefaultProvider()

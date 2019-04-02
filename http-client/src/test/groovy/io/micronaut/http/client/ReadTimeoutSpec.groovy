@@ -21,6 +21,7 @@ import io.micronaut.http.HttpRequest
 import io.micronaut.http.MediaType
 import io.micronaut.http.annotation.Controller
 import io.micronaut.http.client.annotation.Client
+import io.micronaut.http.client.exceptions.HttpClientResponseException
 import io.micronaut.http.client.exceptions.ReadTimeoutException
 import io.micronaut.runtime.server.EmbeddedServer
 import io.micronaut.http.annotation.Get
@@ -39,11 +40,10 @@ class ReadTimeoutSpec extends Specification {
     @Shared
     @AutoCleanup
     ApplicationContext context = ApplicationContext.run(
-            "micronaut.http.client.readTimeout":'1s'
+            "micronaut.http.client.readTimeout":'3s'
     )
 
     @Shared
-    @AutoCleanup
     EmbeddedServer embeddedServer = context.getBean(EmbeddedServer).start()
 
     @Shared
@@ -64,7 +64,8 @@ class ReadTimeoutSpec extends Specification {
         given:
         ApplicationContext clientContext = ApplicationContext.run(
                 'micronaut.http.client.read-timeout':'1s',
-                'micronaut.http.client.pool.enabled':true
+                'micronaut.http.client.pool.enabled':true,
+                'micronaut.http.client.pool.max-connections':1
         )
         RxHttpClient client = clientContext.createBean(RxHttpClient, embeddedServer.getURL())
         when:
@@ -74,7 +75,15 @@ class ReadTimeoutSpec extends Specification {
         def e = thrown(ReadTimeoutException)
         e.message == 'Read Timeout'
 
+        when:"Another request is made"
+        def result = client.retrieve(HttpRequest.GET('/timeout/success'), String).blockingFirst()
+        def result2 = client.retrieve(HttpRequest.GET('/timeout/success'), String).blockingFirst()
+
+        then:"Ensure the read timeout was reset in the connection in the pool"
+        result == result2
+
         cleanup:
+        client.close()
         clientContext.close()
     }
 
@@ -92,7 +101,7 @@ class ReadTimeoutSpec extends Specification {
         result == 'success'
 
         cleanup:
-        server.stop()
+        client.close()
         clientContext.close()
     }
 
@@ -111,6 +120,11 @@ class ReadTimeoutSpec extends Specification {
         @Get(value = "/client", produces = MediaType.TEXT_PLAIN)
         String test() {
             return testClient.get()
+        }
+
+        @Get(value = "/success", produces = MediaType.TEXT_PLAIN)
+        String success() {
+            return "ok"
         }
     }
 
